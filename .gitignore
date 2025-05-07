@@ -3,3 +3,6 @@ uploads/*
 
 processed/*
 !processed/.gitkeep
+
+__pycache__/
+*.pyc

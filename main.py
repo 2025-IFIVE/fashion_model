@@ -8,6 +8,7 @@ import os
 import shutil
 import uuid
 from cropModel.crop import apply_grabcut, rembg, cv2
+from bodyModel.body_shape_detector import detect_body_shape_from_bytes
 
 app = FastAPI()
 
@@ -43,6 +44,13 @@ async def analyze(file: UploadFile = File(...)):
     result["imageUrl"] = f"/{processed_path.replace(os.sep, '/')}"
 
     return result
+
+@app.post("/body-shape")
+async def body_shape(file: UploadFile = File(...)):
+    image_bytes = await file.read()
+    shape = detect_body_shape_from_bytes(image_bytes)
+    return {"체형": shape}
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

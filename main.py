@@ -49,7 +49,7 @@ async def analyze(file: UploadFile = File(...)):
 async def body_shape(file: UploadFile = File(...)):
     image_bytes = await file.read()
     shape = detect_body_shape_from_bytes(image_bytes)
-    return {"체형": shape}
+    return [shape]
 
 
 if __name__ == "__main__":

@@ -8,5 +8,6 @@ rembg
 python-multipart
 numpy
 requests
-onnxruntime
+onnxruntime==1.16.3
 onnxruntime-gpu
+mediapipe

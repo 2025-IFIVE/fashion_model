@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File
 from model_loader import load_models
 from inference import preprocess_image, run_inference
 from io import BytesIO
+import numpy as np
 import uvicorn
 import os
 import shutil
@@ -9,6 +10,7 @@ import uuid
 import requests
 from cropModel.crop import apply_grabcut, rembg, cv2
 from bodyModel.body_shape_detector import detect_body_shape_from_bytes
+from bodyModel.body_shape_pose import detect_body_shape_with_pose_and_segmentation
 
 app = FastAPI()
 
@@ -62,5 +64,11 @@ async def analyze(file: UploadFile = File(...)):
 @app.post("/body-shape")
 async def body_shape(file: UploadFile = File(...)):
     image_bytes = await file.read()
-    shape = detect_body_shape_from_bytes(image_bytes)
-    return {"bodyShape": shape}
+    np_arr = np.frombuffer(image_bytes, np.uint8)
+    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    if image is None:
+        return ["이미지 디코딩 실패"]
+
+    shape, _ = detect_body_shape_with_pose_and_segmentation(image)
+    return [shape]

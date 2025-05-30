@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request, Header
 from model_loader import load_models
 from inference import preprocess_image, run_inference
 from io import BytesIO
@@ -8,9 +8,10 @@ import os
 import shutil
 import uuid
 import requests
+import jwt
 from cropModel.crop import apply_grabcut, rembg, cv2
-from bodyModel.body_shape_detector import detect_body_shape_from_bytes
 from bodyModel.body_shape_pose import detect_body_shape_with_pose_and_segmentation
+from matchingModel.match import match_image_against_db
 
 app = FastAPI()
 
@@ -23,6 +24,8 @@ os.makedirs(ORIGINAL_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DIR, exist_ok=True)
 
 SPRING_UPLOAD_URL = "http://localhost:8080/api/internal/upload-cropped"
+JWT_SECRET = "fitza_secret"  # Spring과 동일한 secret 사용
+JWT_ALGORITHM = "HS256"
 
 def send_cropped_to_spring(cropped_path: str, filename: str):
     with open(cropped_path, "rb") as f:
@@ -31,6 +34,13 @@ def send_cropped_to_spring(cropped_path: str, filename: str):
         if response.status_code != 200:
             raise Exception(f"Spring 업로드 실패: {response.status_code} - {response.text}")
         return response.text.strip()
+
+def extract_user_id_from_token(auth_header: str) -> int:
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise Exception("Authorization 헤더가 없거나 잘못되었습니다.")
+    token = auth_header.replace("Bearer ", "")
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    return payload.get("userId")
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
@@ -72,3 +82,20 @@ async def body_shape(file: UploadFile = File(...)):
 
     shape, _ = detect_body_shape_with_pose_and_segmentation(image)
     return [shape]
+
+@app.post("/match")
+async def match(file: UploadFile = File(...), authorization: str = Header(...)):
+    print("111111")
+    user_id = extract_user_id_from_token(authorization)
+    print("22222")
+    ext = file.filename.split(".")[-1]
+    file_name = f"{uuid.uuid4()}.{ext}"
+    save_path = os.path.join(ORIGINAL_DIR, file_name)
+
+    print("33333")
+    with open(save_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    print("444444")
+    match_result = match_image_against_db(user_id=user_id, image_path=save_path)
+    print("55555")
+    return match_result

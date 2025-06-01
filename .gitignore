@@ -6,3 +6,6 @@ processed/*
 
 __pycache__/
 *.pyc
+
+cache/*
+!cache/.gitkeep

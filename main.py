@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Request, Header
+from fastapi import FastAPI, UploadFile, File, Header
 from model_loader import load_models
 from inference import preprocess_image, run_inference
 from io import BytesIO
@@ -9,9 +9,12 @@ import shutil
 import uuid
 import requests
 import jwt
+
 from cropModel.crop import apply_grabcut, rembg, cv2
+from bodyModel.body_shape_detector import detect_body_shape_from_bytes
 from bodyModel.body_shape_pose import detect_body_shape_with_pose_and_segmentation
-from matchingModel.match import match_image_against_db
+from matchingModel.match import match_image_against_db  # ✅ 추가
+
 
 app = FastAPI()
 
@@ -24,7 +27,7 @@ os.makedirs(ORIGINAL_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DIR, exist_ok=True)
 
 SPRING_UPLOAD_URL = "http://localhost:8080/api/internal/upload-cropped"
-JWT_SECRET = "fitza_secret"  # Spring과 동일한 secret 사용
+JWT_SECRET = "mysupersecretkeythatshouldbelongenough"
 JWT_ALGORITHM = "HS256"
 
 def send_cropped_to_spring(cropped_path: str, filename: str):
@@ -35,6 +38,7 @@ def send_cropped_to_spring(cropped_path: str, filename: str):
             raise Exception(f"Spring 업로드 실패: {response.status_code} - {response.text}")
         return response.text.strip()
 
+# ✅ JWT 토큰에서 userId 추출
 def extract_user_id_from_token(auth_header: str) -> int:
     if not auth_header or not auth_header.startswith("Bearer "):
         raise Exception("Authorization 헤더가 없거나 잘못되었습니다.")
@@ -83,19 +87,31 @@ async def body_shape(file: UploadFile = File(...)):
     shape, _ = detect_body_shape_with_pose_and_segmentation(image)
     return [shape]
 
+# ✅ 이미지 매칭 API 추가
 @app.post("/match")
 async def match(file: UploadFile = File(...), authorization: str = Header(...)):
-    print("111111")
-    user_id = extract_user_id_from_token(authorization)
-    print("22222")
+    print("✅ /match 요청 수신")
+    try:
+        user_id = extract_user_id_from_token(authorization)
+        print("🔑 추출된 userId:", user_id)
+    except Exception as e:
+        print("❌ JWT 오류:", str(e))
+        raise
+
     ext = file.filename.split(".")[-1]
     file_name = f"{uuid.uuid4()}.{ext}"
     save_path = os.path.join(ORIGINAL_DIR, file_name)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-    print("33333")
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    print("444444")
-    match_result = match_image_against_db(user_id=user_id, image_path=save_path)
-    print("55555")
+    print("📁 저장된 이미지 경로:", save_path)
+
+    try:
+        match_result = match_image_against_db(user_id=user_id, image_path=save_path)
+        print("📊 매칭 결과:", match_result)
+    except Exception as e:
+        print("❌ 매칭 처리 중 오류:", str(e))
+        raise
+
     return match_result

@@ -1,60 +1,75 @@
 import os
+import requests
+from PIL import Image
+from io import BytesIO
+from ultralyticsplus import YOLO
 import torch
 import clip
 import numpy as np
-from PIL import Image
-from ultralyticsplus import YOLO
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ✅ PyTorch 2.6+ 대응: 안전하게 로드할 글로벌 클래스 등록
-from torch.serialization import safe_globals
-from ultralytics.nn.tasks import DetectionModel
-from torch.nn import Sequential  # ← 에러 메시지에 따라 추가
-# 필요한 경우 여기서 다른 nn 모듈도 추가 가능
+clip_model, preprocess = clip.load("ViT-B/32", device="cuda" if torch.cuda.is_available() else "cpu")
+yolo_model = YOLO("kesimeg/yolov8n-clothing-detection")
 
-# YOLO 모델 경로 (Roboflow 모델 or 로컬 .pt)
-YOLO_MODEL_PATH = "kesimeg/yolov8n-clothing-detection"
+SPRING_WARDROBE_API = "http://localhost:8080/api/internal/wardrobe"
 
-# CLIP 모델 로드
-device = "cuda" if torch.cuda.is_available() else "cpu"
-clip_model, preprocess = clip.load("ViT-B/32", device=device)
+def download_image_from_url(url):
+    try:
+        response = requests.get(url)
+        print(f"🔗 요청 URL: {url} | 상태 코드: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"⚠️ 다운로드 실패 ❌ -> 응답 내용: {response.text[:200]}")
+            return None
 
-# ✅ YOLO 모델 로딩 시 safe_globals context로 감쌈
-with safe_globals([DetectionModel, Sequential]):
-    yolo_model = YOLO(YOLO_MODEL_PATH)
+        return Image.open(BytesIO(response.content))
 
-def match_image_against_db(user_id, image_path):
-    """
-    전신 이미지와 옷장 이미지 간 유사도 분석 (CLIP 기반).
-    가장 유사한 옷 이미지 반환.
-    """
-    # 입력 이미지 전처리 및 임베딩
-    image = preprocess(Image.open(image_path)).unsqueeze(0).to(device)
+    except Exception as e:
+        print(f"❌ 예외 발생: {e} | 요청 URL: {url}")
+        return None
+
+
+def match_image_against_db(user_id, image_path, top_n=3):
+    print("📡 옷장 조회 요청:", f"{SPRING_WARDROBE_API}/{user_id}")
+    try:
+        wardrobe_response = requests.get(f"{SPRING_WARDROBE_API}/{user_id}")
+        wardrobe_response.raise_for_status()
+        wardrobe_items = wardrobe_response.json()
+    except Exception as e:
+        return {"error": f"Spring API 요청 실패: {e}"}
+
+    if not wardrobe_items:
+        return {"error": "등록된 옷 이미지가 없습니다."}
+
+    image = preprocess(Image.open(image_path)).unsqueeze(0)
     with torch.no_grad():
         image_features = clip_model.encode_image(image)
 
-    # 유저 옷장 이미지 임베딩
-    closet_dir = f"./user_closets/{user_id}"
-    similarities = []
-
-    for fname in os.listdir(closet_dir):
-        if not fname.lower().endswith((".png", ".jpg", ".jpeg")):
+    results = []
+    for item in wardrobe_items:
+        image_url = "http://localhost:8080" + (item.get("croppedPath") or item.get("imagePath"))
+        cloth_id = item.get("clothId")
+        image_obj = download_image_from_url(image_url)
+        if image_obj is None:
             continue
 
-        closet_path = os.path.join(closet_dir, fname)
-        closet_img = preprocess(Image.open(closet_path)).unsqueeze(0).to(device)
-        with torch.no_grad():
-            closet_feat = clip_model.encode_image(closet_img)
+        try:
+            closet_img = preprocess(image_obj).unsqueeze(0)
+            with torch.no_grad():
+                closet_feat = clip_model.encode_image(closet_img)
+            sim = cosine_similarity(image_features.cpu(), closet_feat.cpu())[0][0]
+            results.append({
+                "clothId": cloth_id,
+                "imageUrl": image_url,
+                "similarity": float(sim)
+            })
+        except Exception as e:
+            print(f"⚠️ 이미지 처리 오류: {image_url}, {e}")
 
-        sim = cosine_similarity(image_features.cpu(), closet_feat.cpu())[0][0]
-        similarities.append((fname, sim))
+    top_matches = sorted(results, key=lambda x: x["similarity"], reverse=True)[:top_n]
+    return {
+    "matchedImages": [item["imageUrl"] for item in top_matches],
+    "labels": [item["clothId"] for item in top_matches],
+    "scores": [item["similarity"] for item in top_matches]
+}
 
-    # 유사도 기반 가장 유사한 이미지 선택
-    if similarities:
-        best_match = max(similarities, key=lambda x: x[1])
-        return {
-            "best_match": best_match[0],
-            "similarity": float(best_match[1])
-        }
-    else:
-        return {"error": "No images found in closet."}

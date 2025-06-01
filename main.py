@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from model_loader import load_models
 from inference import preprocess_image, run_inference
 from io import BytesIO
@@ -11,8 +11,19 @@ import requests
 from cropModel.crop import apply_grabcut, rembg, cv2
 from bodyModel.body_shape_detector import detect_body_shape_from_bytes
 from bodyModel.body_shape_pose import detect_body_shape_with_pose_and_segmentation
+from recommendModel.recommend_logic import generate_recommendation
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 또는 ["http://localhost:8080"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 type_model, attr_model, style_model = load_models()
 
@@ -72,3 +83,37 @@ async def body_shape(file: UploadFile = File(...)):
 
     shape, _ = detect_body_shape_with_pose_and_segmentation(image)
     return [shape]
+    shape = detect_body_shape_from_bytes(image_bytes)
+    return {"bodyShape": shape}
+
+# ✅ 요청 바디 스키마
+class RecommendRequestDTO(BaseModel):
+    userId: int
+    weather: str  # 예: "23~27도"
+
+    # ✅ 추천 요청 엔드포인트
+@app.post("/recommend")
+def recommend(req: RecommendRequestDTO):
+    try:
+        # Spring 서버에서 유저 옷 데이터 가져오기
+        spring_url = f"http://localhost:8080/api/clothing/user/{req.userId}"
+        response = requests.get(spring_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Spring 통신 실패: {response.status_code}")
+
+        closet_items = response.json()  # 예상 구조: [{ "id": ..., "type": "상의", "imagePath": ... }, ...]
+
+        # 추천 생성
+        result = generate_recommendation(closet_items, req.weather)
+
+        if result is None:
+            raise HTTPException(status_code=404, detail="추천 가능한 조합이 없습니다.")
+
+        return {
+            "userId": req.userId,
+            "weather": req.weather,
+            "recommendation": result
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

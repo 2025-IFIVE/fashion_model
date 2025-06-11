@@ -159,4 +159,25 @@ async def match(file: UploadFile = File(...), authorization: str = Header(...)):
         print("매칭 처리 중 오류:", str(e))
         raise
 
-    return match_result
+    # 중복 제거를 위한 집합
+    seen_ids = set()
+    matchedImages, clothIds, labels, scores = [], [], [], []
+
+    for m in match_result["matches"]:
+        cid = m["matchedClothId"]
+        if cid in seen_ids:
+            continue
+        seen_ids.add(cid)
+
+        matchedImages.append(m["matchedImagePath"])
+        clothIds.append(cid)
+        labels.append(m["partLabel"])
+        scores.append(m["similarity"])
+
+    return {
+        "matchedImages": matchedImages,
+        "clothIds": clothIds,
+        "labels": labels,
+        "scores": scores
+    }
+

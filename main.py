@@ -18,6 +18,8 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from matchingModel.match import match_image_against_db  
 
+from matchingModel.match_yolo import match_image_against_db_v2
+
 
 app = FastAPI()
 
@@ -132,6 +134,7 @@ def recommend(req: RecommendRequestDTO):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+'''
 # 이미지 매칭 API 추가
 @app.post("/match")
 async def match(file: UploadFile = File(...), authorization: str = Header(...)):
@@ -154,6 +157,36 @@ async def match(file: UploadFile = File(...), authorization: str = Header(...)):
 
     try:
         match_result = match_image_against_db(user_id=user_id, image_path=save_path)
+        print("매칭 결과:", match_result)
+    except Exception as e:
+        print("매칭 처리 중 오류:", str(e))
+        raise
+
+    return match_result
+    '''
+#매칭
+@app.post("/match")
+async def match(file: UploadFile = File(...), authorization: str = Header(...)):
+    print("/match 요청 수신")
+    try:
+        user_id = extract_user_id_from_token(authorization)
+        print("추출된 userId:", user_id)
+    except Exception as e:
+        print("JWT 오류:", str(e))
+        raise
+
+    ext = file.filename.split(".")[-1]
+    file_name = f"{uuid.uuid4()}.{ext}"
+    save_path = os.path.join(ORIGINAL_DIR, file_name)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    with open(save_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    print("저장된 이미지 경로:", save_path)
+
+    try:
+        # ✅ CLIP → YOLO+속성 기반으로 변경
+        match_result = match_image_against_db_v2(user_id=user_id, image_path=save_path)
         print("매칭 결과:", match_result)
     except Exception as e:
         print("매칭 처리 중 오류:", str(e))

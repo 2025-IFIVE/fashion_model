@@ -1,9 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-전신 → (YOLO 크롭) → (CLIP 임베딩 매칭 Top-N) → (필요시 재랭크 확장 가능)
-→ Top-K 중 Top1씩 반환 (main.py에서 중복 제거 로직 수행)
-"""
-
 import os
 import io
 import json
@@ -231,34 +225,35 @@ def _fetch_wardrobe_items(user_id: int) -> List[Dict]:
     return r.json()
 
 def _build_wardrobe_embeddings(wardrobe_items: List[Dict]) -> Tuple[np.ndarray, List[Dict]]:
-    
-    embs = []
-    info = []
+    embs, info = [], []
     for item in wardrobe_items:
-        raw_path = item.get("imagePath", "")
-        if not raw_path:
+        original_rel = (item.get("imagePath") or "").strip()
+        if not original_rel:
             continue
-        url = to_absolute_url(raw_path, SPRING_BASE_URL)
+
+        original_url = to_absolute_url(original_rel, SPRING_BASE_URL)
+
+        # 선택: 크롭 경로가 있으면 절대경로화
+        cropped_rel = (item.get("croppedPath") or "").strip()
+        cropped_url = to_absolute_url(cropped_rel, SPRING_BASE_URL) if cropped_rel else ""
+
         try:
-            pil = _download_pil(url)
+            pil = _download_pil(original_url)
+            feat = _embed_pil(pil)  # (1, d)  ← 임베딩은 원본으로
         except Exception as e:
-            print(f"[wardrobe] 다운로드 실패: {url} | {e}")
+            print(f"[wardrobe] 다운로드/임베딩 실패: {original_url} | {e}")
             continue
-        try:
-            feat = _embed_pil(pil)  # (1, d)
-            embs.append(feat[0])
-            info.append({
-                "clothId": item.get("clothId"),
-                "imagePath": url,
-                "type": item.get("type", "UNKNOWN")
-            })
-        except Exception as e:
-            print(f"[wardrobe] 임베딩 실패: {url} | {e}")
-            continue
+
+        embs.append(feat[0])
+        info.append({
+            "clothId": item.get("clothId") or item.get("id"),
+            "type": item.get("type", "UNKNOWN"),
+            "originalUrl": original_url,
+            "croppedUrl": cropped_url,  # ← 응답 시 우선 사용
+        })
 
     if not embs:
         raise RuntimeError("옷장 이미지 임베딩 생성 실패 (다운로드/임베딩 실패)")
-
     return np.stack(embs, axis=0), info
 
 # ─────────────────────────────────────────────────────────
@@ -299,11 +294,14 @@ def match_image_against_db(user_id: int, image_path: str, top_n: int = 1) -> Dic
         best_sim = float(sims[best_idx])
 
         win = wardrobe_info[best_idx]
+
+        final_url = win["croppedUrl"] if win.get("croppedUrl") else win["originalUrl"]
+
         matches.append({
             "partIndex": i,
             "partLabel": label,
             "matchedClothId": win["clothId"],
-            "matchedImagePath": win["imagePath"],
+            "matchedImagePath": final_url,
             "matchedType": win.get("type", "UNKNOWN"),
             "similarity": best_sim
         })

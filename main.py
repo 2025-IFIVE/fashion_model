@@ -31,6 +31,11 @@ app.add_middleware(
 
 type_model, attr_model, style_model = load_models()
 
+SPRING_BASE_URL = os.getenv("SPRING_BASE_URL", "http://localhost:8080")
+SPRING_UPLOAD_URL = os.getenv("SPRING_UPLOAD_URL", f"{SPRING_BASE_URL}/api/internal/upload-cropped")
+JWT_SECRET = os.getenv("JWT_SECRET", "mysupersecretkeythatshouldbelongenough")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+
 UPLOAD_DIR = "uploads"
 ORIGINAL_DIR = os.path.join(UPLOAD_DIR, "original")
 PROCESSED_DIR = "processed"
@@ -136,48 +141,36 @@ def recommend(req: RecommendRequestDTO):
 @app.post("/match")
 async def match(file: UploadFile = File(...), authorization: str = Header(...)):
     print("/match 요청 수신")
-    try:
-        user_id = extract_user_id_from_token(authorization)
-        print("추출된 userId:", user_id)
-    except Exception as e:
-        print("JWT 오류:", str(e))
-        raise
+    user_id = extract_user_id_from_token(authorization)
+    print("추출된 userId:", user_id)
 
-    ext = file.filename.split(".")[-1]
+    ext = (file.filename.split(".")[-1] or "jpg").lower()
     file_name = f"{uuid.uuid4()}.{ext}"
     save_path = os.path.join(ORIGINAL_DIR, file_name)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
     print("저장된 이미지 경로:", save_path)
 
     try:
-        match_result = match_image_against_db(user_id=user_id, image_path=save_path)
+        match_result = match_image_against_db(user_id=user_id, image_path=save_path)  # ← 내부 파이프라인 호출
         print("매칭 결과:", match_result)
     except Exception as e:
         print("매칭 처리 중 오류:", str(e))
-        raise
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # 중복 제거를 위한 집합
+    # 기존 프런트/스프링과 호환되는 응답 형식
     seen_ids = set()
     matchedImages, clothIds, labels, scores = [], [], [], []
-
-    for m in match_result["matches"]:
+    for m in match_result.get("matches", []):
         cid = m["matchedClothId"]
         if cid in seen_ids:
             continue
         seen_ids.add(cid)
-
         matchedImages.append(m["matchedImagePath"])
         clothIds.append(cid)
         labels.append(m["partLabel"])
         scores.append(m["similarity"])
 
-    return {
-        "matchedImages": matchedImages,
-        "clothIds": clothIds,
-        "labels": labels,
-        "scores": scores
-    }
+    return {"matchedImages": matchedImages, "clothIds": clothIds, "labels": labels, "scores": scores}
 

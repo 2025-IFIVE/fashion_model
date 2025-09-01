@@ -18,7 +18,8 @@ BOTTOM_ONLY         = os.getenv("CROP_BOTTOM_ONLY", "false").lower() == "true"
 
 MASK_THRESHOLD      = float(os.getenv("CROP_MASK_THRESHOLD", "0.35"))
 CLOTH_BOOST         = float(os.getenv("CROP_CLOTH_BOOST", "1.3"))
-NEGATIVE_PENALTY    = float(os.getenv("CROP_NEG_PENALTY", "0.6"))
+NEGATIVE_PENALTY    = float(os.getenv("CROP_NEG_PENALTY", "0.6"))  # print2.py 기본값과 동일
+
 SMOOTH_KERNEL       = int(os.getenv("CROP_SMOOTH_KERNEL", "3"))
 FEATHER_SIGMA       = float(os.getenv("CROP_FEATHER_SIGMA", "0.8"))
 RMBG_WEIGHT         = float(os.getenv("CROP_RMBG_WEIGHT", "0.8"))
@@ -59,9 +60,17 @@ DRESS_PROMPTS = [
     "dress", "one-piece dress", "long dress", "midi dress", "gown",
     "casual dress", "summer dress", "knit dress", "jumpsuit", "romper"
 ]
+
+# 🔹 프린팅(그래픽/로고/텍스트) 보호용 프롬프트 (print2.py 반영)
+PRINT_PROMPTS = [
+    "graphic print", "illustration", "cartoon", "anime", "comic",
+    "logo", "text print", "graphic tee"
+]
+
+# 🔹 부정 프롬프트를 real human으로 제한(프린팅을 피부로 오검출 방지)
 NEGATIVE_PROMPTS = [
-    "skin", "bare skin", "exposed skin", "naked skin",
-    "face", "facial features", "ear", "neck", "neck skin",
+    "real human skin", "naked human skin",
+    "real human face", "ear", "neck", "neck skin",
     "arm", "forearm", "elbow", "hand", "finger", "wrist",
     "leg", "thigh", "knee", "calf", "ankle", "foot", "toe",
     "belly", "abdomen", "stomach", "midriff", "collarbone skin", "clavicle skin",
@@ -74,7 +83,7 @@ NEGATIVE_PROMPTS = [
 _device_idx = 0 if torch.cuda.is_available() else -1
 _clipseg_proc: CLIPSegProcessor | None = None
 _clipseg_model: CLIPSegForImageSegmentation | None = None
-_rmbg_pipe = None  # rembg 없는 RGBA 입력 대비용 (필수 아님)
+_rmbg_pipe = None  # print2.py처럼 항상 사용 (GPU/CPU 무관)
 
 def _lazy_load_models():
     global _clipseg_proc, _clipseg_model, _rmbg_pipe
@@ -82,14 +91,13 @@ def _lazy_load_models():
         _clipseg_proc = CLIPSegProcessor.from_pretrained("CIDAS/clipseg-rd64-refined")
         _clipseg_model = CLIPSegForImageSegmentation.from_pretrained("CIDAS/clipseg-rd64-refined")
         _clipseg_model = _clipseg_model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
-    # RMBG 파이프는 입력이 RGB만 올 때만 필요
-    if _rmbg_pipe is None and _device_idx == -1:
-        # CPU에서도 충분히 동작. (CUDA면 별 의미 없음)
+    # ✅ GPU/CPU와 상관없이 RMBG 로드 (print2.py와 동일한 동작 보장)
+    if _rmbg_pipe is None:
         try:
             _rmbg_pipe = pipeline("image-segmentation", model="briaai/RMBG-1.4",
                                   trust_remote_code=True, device=_device_idx)
         except Exception:
-            _rmbg_pipe = None
+            _rmbg_pipe = None  # 네트워크/환경 이슈 시 graceful fallback
 
 # =========================
 # ▶ 유틸
@@ -138,6 +146,13 @@ def _remove_small(mask01: np.ndarray, min_area_ratio: float) -> np.ndarray:
     for i in range(1, num):
         if stats[i, cv2.CC_STAT_AREA] < min_area:
             m[lab == i] = 0
+    return m.astype(np.float32) / 255.0
+
+def _close_small_holes(mask01: np.ndarray, ksize: int = 5) -> np.ndarray:
+    """프린팅 내부의 작은 구멍(핀홀) 메움 — print2.py 반영"""
+    m = (mask01 * 255).astype(np.uint8)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k, iterations=1)
     return m.astype(np.float32) / 255.0
 
 def _feather_alpha(rgba: np.ndarray, sigma: float) -> np.ndarray:
@@ -272,13 +287,13 @@ def _keep_component_crossing(mask01: np.ndarray, y_star: int, min_area_ratio=0.0
     return keep.astype(np.float32) / 255.0
 
 def _refine_with_crf_stub(image_rgb: np.ndarray, prob_fg: np.ndarray, iters: int = 5) -> np.ndarray:
+    # print2.py에서도 ENABLE_CRF=False라서 동일 동작
     return prob_fg
 
 # =========================
 # ▶ 외부 공개 함수 (FastAPI 메인과 호환)
 # =========================
 def apply_grabcut(image: np.ndarray) -> np.ndarray:
-    
     _lazy_load_models()
 
     # 1) 해상도 제한 & 색공간 정리 (원본 보존용)
@@ -286,16 +301,13 @@ def apply_grabcut(image: np.ndarray) -> np.ndarray:
     img_in = _resize_if_large(img_in, MAX_IMAGE_SIZE)
     img_bgr = _ensure_bgr(img_in)  # 내부 통일: BGR
 
-    # 2) RMBG 알파 가져오기
-    #    - RGBA 입력이면 그 알파를 활용
-    #    - 아니면 briaai/RMBG-1.4 파이프라인이 있으면 사용, 없으면 알파=1.0
+    # 2) RMBG 알파 가져오기 (print2.py처럼 항상 시도)
     a01 = _alpha_from_rgba(img_in)
-    if a01 is None:
-        if _rmbg_pipe is not None:
-            pil_rgba = _rmbg_pipe(_to_rgb_pil(img_bgr))
-            a01 = _to01_from_pil_rgba(pil_rgba)
-        else:
-            a01 = np.ones(img_bgr.shape[:2], np.float32)
+    if a01 is None and _rmbg_pipe is not None:
+        pil_rgba = _rmbg_pipe(_to_rgb_pil(img_bgr))
+        a01 = _to01_from_pil_rgba(pil_rgba)
+    if a01 is None:  # 안전장치
+        a01 = np.ones(img_bgr.shape[:2], np.float32)
     a01 = np.clip(a01 * RMBG_WEIGHT, 0, 1)
 
     # 3) CLIPSeg 맵
@@ -305,8 +317,15 @@ def apply_grabcut(image: np.ndarray) -> np.ndarray:
     top_map = np.maximum.reduce(top_maps) if top_maps else np.zeros(pil_rgb.size[::-1], np.float32)
     bot_map = np.maximum.reduce(bot_maps) if bot_maps else np.zeros_like(top_map)
 
+    # 부정(피부/신체) + 프린팅 맵
     neg_masks = _predict_clipseg(_clipseg_proc, _clipseg_model, pil_rgb, NEGATIVE_PROMPTS)
     neg_map = np.maximum.reduce(neg_masks) if neg_masks else np.zeros_like(top_map)
+
+    print_maps = _predict_clipseg(_clipseg_proc, _clipseg_model, pil_rgb, PRINT_PROMPTS, boost_factor=1.2)
+    print_map  = np.maximum.reduce(print_maps) if print_maps else np.zeros_like(top_map)
+
+    # 프린팅이 강할수록 부정맵 영향 약화(0.3~1.0 게이트) — print2.py 동일식
+    neg_gate = np.clip(1.0 - 0.7 * print_map, 0.3, 1.0)
 
     # 4) 경계/원피스 판정
     y_star, _ = _find_boundary(top_map, bot_map)
@@ -317,8 +336,11 @@ def apply_grabcut(image: np.ndarray) -> np.ndarray:
         dress_maps = _predict_clipseg(_clipseg_proc, _clipseg_model, pil_rgb, DRESS_PROMPTS, boost_factor=1.5)
         dress_map = np.maximum.reduce(dress_maps) if dress_maps else np.zeros_like(top_map)
         pos_soft = np.maximum.reduce([dress_map, top_map, bot_map])
-        raw = a01 * (pos_soft * (1.0 - 0.9 * neg_map))
-        raw = _refine_with_crf_stub(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB), np.clip(raw, 0, 1).astype(np.float32), iters=5)
+
+        # 프린팅 보호 반영 (0.9 * neg_map * neg_gate)
+        raw = a01 * (pos_soft * (1.0 - 0.9 * neg_map * neg_gate))
+        raw = _refine_with_crf_stub(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB),
+                                    np.clip(raw, 0, 1).astype(np.float32), iters=5)
 
         mask01 = _adaptive_threshold(np.clip(raw, 0, 1), max(0.32, MASK_THRESHOLD - 0.03))
         mask01 = _postprocess_mask01(mask01, SMOOTH_KERNEL)
@@ -331,6 +353,10 @@ def apply_grabcut(image: np.ndarray) -> np.ndarray:
         skin_bin1   = _postprocess_mask01(skin_bin1, SKIN_POST_KERNEL)
         mask01      = np.clip(mask01 * (1.0 - skin_bin1), 0, 1)
         mask01      = _postprocess_mask01(mask01, SMOOTH_KERNEL)
+
+        # 프린팅 내부 핀홀 닫기 — print2.py 동일
+        mask01 = _close_small_holes(mask01, ksize=5)
+
     else:
         if TOP_ONLY and not BOTTOM_ONLY:
             target = 'top'
@@ -347,12 +373,17 @@ def apply_grabcut(image: np.ndarray) -> np.ndarray:
             gate = _gate(H, y_star, band=0.06, invert=True)
             pos_soft = bot_map * gate
 
-        raw = a01 * (pos_soft * (1.0 - NEGATIVE_PENALTY * neg_map))
-        raw = _refine_with_crf_stub(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB), np.clip(raw, 0, 1).astype(np.float32), iters=5)
+        # 프린팅 보호 반영 (NEGATIVE_PENALTY * neg_map * neg_gate)
+        raw = a01 * (pos_soft * (1.0 - NEGATIVE_PENALTY * neg_map * neg_gate))
+        raw = _refine_with_crf_stub(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB),
+                                    np.clip(raw, 0, 1).astype(np.float32), iters=5)
 
         mask01 = _adaptive_threshold(np.clip(raw, 0, 1), MASK_THRESHOLD)
         mask01 = _postprocess_mask01(mask01, SMOOTH_KERNEL)
         mask01 = _remove_small(mask01, MIN_AREA_RATIO)
+
+        # 프린팅 내부 핀홀 닫기 — print2.py 동일
+        mask01 = _close_small_holes(mask01, ksize=5)
 
     # 6) 합성 (RGBA->BGRA) & feather
     rgba = _compose_rgba(img_bgr, mask01)
@@ -364,7 +395,6 @@ def apply_grabcut(image: np.ndarray) -> np.ndarray:
 # ▶ 내부 보조 (정의 순서상 마지막에)
 # =========================
 def _ensure_bgr(image: np.ndarray) -> np.ndarray:
-    
     if image.ndim == 2:
         return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     if image.shape[2] == 4:
